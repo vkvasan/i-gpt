@@ -2,86 +2,88 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
-def i_exp(q, S):
-    """
-    Integer-only computation of the exponential function (exp).
 
-    :param q: quantized input (qS = x)
+def i_poly_tensor(q, a, b, c, S):
+    """
+    Tensor version of I-POLY for integer-only computation of second-order polynomial.
+
+    :param q: quantized input tensor (qS = x)
+    :param a: coefficient of x^2
+    :param b: coefficient of x
+    :param c: constant term
     :param S: scaling factor
-    :return: qout, Sout: quantized output and scaling factor
+    :return: qout, Sout: quantized output tensor and scaling factor
     """
-    a, b, c = 0.3585, 1.353, 0.344
-    q_ln2 = round(b * math.log(2) / S)
+    # Ensuring all parameters are tensors
+    a, b, c, S = torch.tensor(a), torch.tensor(b), torch.tensor(c), torch.tensor(S)
 
-    # Avoid division by zero
-    z = int((b - q) / q_ln2) if q_ln2 != 0 else 0
-    qp = q + z * q_ln2
+    qb = torch.round(b / S)
+    qc = torch.round(c / (a * S**2))
+    Sout = torch.round(a * S**2)
 
-    # Using I-POLY function
-    qL, SL = i_poly(qp, a, b, c, S)
-
-    # Output calculation
-    qout = qL >> z
-    Sout = SL
+    qout = (q + qb)**2 + qc
 
     return qout, Sout
+
 def i_exp(q, S):
     """
-    Integer-only computation of the exponential function (exp).
+    Integer-only computation of the exponential function (exp) with tensor input.
 
-    :param q: quantized input (qS = x)
-    :param S: scaling factor
-    :return: qout, Sout: quantized output and scaling factor
+    :param q: quantized input tensor (qS = x)
+    :param S: scalar scaling factor
+    :return: qout, Sout: quantized output tensor and scaling factor
     """
     a, b, c = 0.3585, 1.353, 0.344
-    q_ln2 = round(b * math.log(2) / S)
+    S = torch.tensor(S, dtype=torch.float32)
 
-    # Avoid division by zero
-    z = int((b - q) / q_ln2) if q_ln2 != 0 else 0
+    q_ln2 = torch.round(b * torch.log(torch.tensor(2.0)) / S)
+
+    z = torch.floor((b - q) / q_ln2)
     qp = q + z * q_ln2
 
-    # Using I-POLY function
-    qL, SL = i_poly(qp, a, b, c, S)
+    # Using I-POLY adapted for tensor input
+    qL, SL = i_poly_tensor(qp, a, b, c, S)
 
-    # Output calculation
-    qout = qL >> z
+    # Converting qL to integer type for the right shift operation
+    qL_int = qL.to(torch.int32)
+    qout = qL_int >> z.to(torch.int32)
     Sout = SL
 
-    return qout, Sout
+    return qout,Sout
+
 def i_softmax(q, S):
     """
-    Integer-only computation of the Softmax function.
+    Integer-only computation of the Softmax function with tensor input.
 
-    :param q: quantized input list (qS = x)
-    :param S: scaling factor
-    :return: qout, Sout: quantized output and scaling factor
+    :param q: quantized input tensor (qS = x)
+    :param S: scalar scaling factor
+    :return: qout, Sout: quantized output tensor and scaling factor
     """
-    print(q,S,torch.max(q))
     # Subtracting the max for numerical stability
-    q_tilde = [qi - torch.max(q) for qi in q]
+    q_tilde = q - torch.max(q)
 
     # Compute exp for each element
-    qexp = [i_exp(qi, S)[0] for qi in q_tilde]
-    Sexp = S  # Assuming the scaling factor remains the same for simplicity
+    qexp, Sexp = i_exp(q_tilde, S)
 
     # Calculating softmax
-    sum_qexp = sum(qexp)
-    qout = [qi / sum_qexp for qi in qexp]
+    sum_qexp = torch.sum(qexp, dtype=torch.float32)
+    qout = qexp / sum_qexp
     Sout = Sexp
 
-    return qout, Sout
+    return qout* Sout
+
 # hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 256 # what is the maximum context length for predictions?
-max_iters = 10
-eval_interval = 2
+max_iters = 5000
+eval_interval = 500
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 eval_iters = 200
 n_embd = 384
-n_head = 1
-n_layer = 1
+n_head = 6
+n_layer = 6
 dropout = 0.2
 # ------------
 
@@ -153,6 +155,7 @@ class Head(nn.Module):
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = i_softmax(wei, 1) # (B, C)
         #wei = F.softmax(wei, dim=-1) # (B, T, T)
+        #wei = torch.tensor(wei)
         wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x) # (B,T,hs)
@@ -294,3 +297,4 @@ for iter in range(max_iters):
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
+
